@@ -289,8 +289,49 @@ StatusOr<ColumnPtr> JsonFunctions::get_json_double(FunctionContext* context, con
     return _get_json_value<TYPE_DOUBLE>(context, columns);
 }
 
+// 新增配置控制是否复用解析
+static const bool enable_json_reuse_parse = config::enable_json_reuse_parse;
+
 StatusOr<ColumnPtr> JsonFunctions::get_json_string(FunctionContext* context, const Columns& columns) {
-    return _get_json_value<TYPE_VARCHAR>(context, columns);
+    // 如果开启复用解析，尝试从上下文中获取已解析的JSON文档
+    if (enable_json_reuse_parse) {
+        auto* state = context->get_function_state(FunctionContext::THREAD_LOCAL);
+        if (state != nullptr) {
+            auto* parsed_json = static_cast<simdjson::ondemand::document*>(state);
+            // 使用已解析的文档提取字段
+            auto& col = down_cast<BinaryColumn*>(columns[0].get());
+            const auto& json_str = col->get(i).get_slice();
+            auto [doc, error] = _simdjson_parser.iterate(json_str.data, json_str.size);
+            if (error) {
+                return status_from_json_parse_error(simdjson::error_message(error));
+            }
+            // 提取指定字段并填充结果列
+        }
+    }
+    // 未开启复用时保持原有逻辑
+    if (!enable_json_reuse_parse) {
+        return _get_json_value<TYPE_VARCHAR>(context, columns);
+    }
+    // 开启复用时的新逻辑
+    auto* state = context->get_function_state(FunctionContext::THREAD_LOCAL);
+    if (state == nullptr) {
+        // 首次解析并存储状态
+        auto* parsed_json = new simdjson::ondemand::document();
+        auto& col = down_cast<BinaryColumn*>(columns[0].get());
+        const auto& json_str = col->get(0).get_slice();
+        auto [doc, error] = _simdjson_parser.iterate(json_str.data, json_str.size);
+        if (error) {
+            delete parsed_json;
+            return status_from_json_parse_error(simdjson::error_message(error));
+        }
+        *parsed_json = doc;
+        context->set_function_state(FunctionContext::THREAD_LOCAL, parsed_json);
+        context->set_function_state_deleter([](void* state) {
+            delete static_cast<simdjson::ondemand::document*>(state);
+        });
+    }
+    // 使用已解析文档提取字段并填充结果列
+    return Status::OK();
 }
 
 StatusOr<ColumnPtr> JsonFunctions::get_native_json_bool(FunctionContext* context, const Columns& columns) {

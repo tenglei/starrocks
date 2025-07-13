@@ -1690,6 +1690,7 @@ CONF_mInt32(avro_reader_buffer_size_bytes, "8388608");
 // default batch size for simdjson lib
 CONF_mInt32(json_parse_many_batch_size, "1000000");
 CONF_mBool(enable_dynamic_batch_size_for_json_parse_many, "true");
+CONF_mBool(enable_json_reuse_parse, "false"); // 新增配置：是否开启JSON解析复用特性
 CONF_mInt32(put_combined_txn_log_thread_pool_num_max, "64");
 CONF_mBool(enable_put_combinded_txn_log_parallel, "false");
 // used to control whether the metrics/ interface collects table metrics

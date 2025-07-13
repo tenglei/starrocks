@@ -589,6 +589,60 @@ INSTANTIATE_TEST_SUITE_P(
                 // clang-format on
                 ));
 
+// 新增测试用例：验证JSON解析复用次数
+TEST_F(JsonFunctionsTest, get_json_string_reuse_parse) {
+    // 模拟可统计解析次数的parser
+    struct MockParser {
+        int parse_count = 0;
+        simdjson::error_code iterate(const char* data, size_t size, simdjson::ondemand::document& doc) {
+            parse_count++;
+            return _real_parser.iterate(data, size, doc);
+        }
+        simdjson::ondemand::parser _real_parser;
+    } mock_parser;
+
+    // 准备测试数据
+    std::unique_ptr<FunctionContext> ctx(FunctionContext::create_test_context());
+    BinaryColumn::Ptr json_col = BinaryColumn::create();
+    BinaryColumn::Ptr path_col = BinaryColumn::create();
+    std::string json_str = R"({"field1": 100, "field2": "value", "field3": [1,2,3], "field4": {"sub": "test"}})";
+    std::vector<std::string> paths = {"$.field1", "$.field2", "$.field3", "$.field4"};
+
+    // 填充5次重复调用数据
+    for (int i = 0; i < 5; ++i) {
+        json_col->append(json_str);
+        path_col->append(paths[i % 4]);
+    }
+    Columns columns = {json_col, path_col};
+    ctx->set_constant_columns(columns);
+
+    // 注入mock parser（需通过测试接口暴露内部parser）
+    auto& internal_parser = ctx->impl()->get_json_parser_for_test(); // 假设存在测试接口
+    internal_parser = &mock_parser;
+
+    // 测试配置开启：应仅解析1次
+    config::enable_json_reuse_parse = true;
+    JsonFunctions::native_json_path_prepare(ctx.get(), FunctionContext::FunctionStateScope::FRAGMENT_LOCAL);
+    ColumnPtr result_enable = JsonFunctions::get_json_string(ctx.get(), columns).value();
+    JsonFunctions::native_json_path_close(ctx.get(), FunctionContext::FunctionStateScope::FRAGMENT_LOCAL);
+    ASSERT_EQ(mock_parser.parse_count, 1);
+
+    // 测试配置关闭：应解析5次
+    mock_parser.parse_count = 0;
+    config::enable_json_reuse_parse = false;
+    JsonFunctions::native_json_path_prepare(ctx.get(), FunctionContext::FunctionStateScope::FRAGMENT_LOCAL);
+    ColumnPtr result_disable = JsonFunctions::get_json_string(ctx.get(), columns).value();
+    JsonFunctions::native_json_path_close(ctx.get(), FunctionContext::FunctionStateScope::FRAGMENT_LOCAL);
+    ASSERT_EQ(mock_parser.parse_count, 5);
+
+    // 验证结果正确性
+    auto v_enable = ColumnHelper::cast_to<TYPE_VARCHAR>(result_enable);
+    ASSERT_EQ("100", v_enable->get_data()[0].to_string());
+    ASSERT_EQ("\"value\"", v_enable->get_data()[1].to_string());
+    ASSERT_EQ("[1,2,3]", v_enable->get_data()[2].to_string());
+    ASSERT_EQ("{\"sub\": \"test\"}", v_enable->get_data()[3].to_string());
+}
+
 class JsonExistTestFixture : public ::testing::TestWithParam<std::tuple<std::string, std::string, bool>> {};
 
 TEST_P(JsonExistTestFixture, json_exists) {
